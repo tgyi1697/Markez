@@ -168,11 +168,19 @@ def extract_block(grid, header_row_idx, sheet_title):
         return row[idx]
 
     rows = []
+    blank_streak = 0
     for offset, row in enumerate(grid[header_row_idx + 1:]):
         row_number = header_row_idx + 2 + offset  # 1-alapú, valódi Sheet sorszám
         iktatoszam = cell(row, "Iktatószám")["value"].strip()
         if not iktatoszam:
-            break
+            # Egy-egy üres sor (pl. elválasztó, vagy egy Drive-linket tartalmazó
+            # jegyzet-sor közvetlenül a fejléc alatt) nem jelenti a blokk végét —
+            # csak több egymást követő üres sor után adjuk fel a keresést.
+            blank_streak += 1
+            if blank_streak >= 5:
+                break
+            continue
+        blank_streak = 0
         rows.append({
             "id": iktatoszam,
             "kep_url": cell(row, "Iktatószám")["link"] or "",
@@ -193,9 +201,18 @@ def extract_block(grid, header_row_idx, sheet_title):
 
 def collect_invoices(grids):
     all_rows = []
+    print(f"{len(grids)} fül található a táblázatban: {', '.join(grids.keys())}")
     for title, grid in grids.items():
-        for header_idx in find_header_rows(grid):
-            all_rows.extend(extract_block(grid, header_idx, title))
+        header_rows = find_header_rows(grid)
+        if not header_rows:
+            print(f"  [{title}] NINCS felismert fejléc-sor (Iktatószám/Fizetési határidő/Fizetve egy sorban) — kihagyva")
+            continue
+        tab_rows = []
+        for header_idx in header_rows:
+            block = extract_block(grid, header_idx, title)
+            print(f"  [{title}] fejléc a(z) {header_idx + 1}. sorban, {len(block)} adat-sor kiolvasva")
+            tab_rows.extend(block)
+        all_rows.extend(tab_rows)
     return all_rows
 
 
