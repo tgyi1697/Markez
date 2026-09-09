@@ -160,6 +160,12 @@ def extract_block(grid, header_row_idx, sheet_title):
         if c["value"] and c["value"].strip()
     }
     fizetve_col = col.get("Fizetve")
+    # A "Számla" oszlop (B) jelöli, hogy a sor valódi számla-e — az
+    # árajánlatok, szerződések stb. sorai ezt nem jelölik be, ezeket nem
+    # szabad se a nyitott számlák közé, se a kiadás-összesítőbe beszámítani.
+    # Ha egy fülön nincs ilyen oszlop, biztonságból mindent számlának
+    # tekintünk (visszafelé kompatibilitás).
+    szamla_col_present = "Számla" in col
 
     def cell(row, name):
         idx = col.get(name)
@@ -181,8 +187,10 @@ def extract_block(grid, header_row_idx, sheet_title):
                 break
             continue
         blank_streak = 0
+        is_szamla = parse_bool(cell(row, "Számla")["value"]) if szamla_col_present else True
         rows.append({
             "id": iktatoszam,
+            "szamla": is_szamla,
             "kep_url": cell(row, "Iktatószám")["link"] or "",
             "megnevezes": cell(row, "Megnevezés")["value"],
             "szamlaszam": cell(row, "Számlaszám")["value"],
@@ -305,7 +313,11 @@ def main():
     clear_url = f"{base_url}/clear-paid"
 
     grids = fetch_sheets_grid(sheets_service, sheet_id)
-    all_invoices = collect_invoices(grids)
+    all_rows = collect_invoices(grids)
+    all_invoices = [r for r in all_rows if r.get("szamla")]
+    skipped = len(all_rows) - len(all_invoices)
+    if skipped:
+        print(f"{skipped} sor kimaradt, mert a \"Számla\" oszlop nincs bepipálva (árajánlat/szerződés/egyéb).")
     by_id = {}
     for inv in all_invoices:
         by_id.setdefault(inv["id"], []).append(inv)
