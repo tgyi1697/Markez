@@ -358,9 +358,24 @@ def main():
         if not inv["fizetve"] and inv["hatarido"]
     ]
 
+    # 3) A pénzügyi összesítőhöz (dashboard "Pénzügyi összesítő" panelje) az
+    # ÖSSZES tétel kell — fizetett is, határidő nélküli is —, hogy a
+    # projektenkénti kiadás-összeg helyes legyen. Csak a szükséges, karcsú
+    # mezőket küldjük.
+    all_invoices_lean = [
+        {
+            "tab": inv["tab"],
+            "megjegyzes": inv["megjegyzes"],
+            "osszeg": inv["osszeg"],
+            "fizetve": inv["fizetve"],
+        }
+        for inv in all_invoices
+    ]
+
     payload = {
         "generated_at": now_hu_str(),
         "invoices": open_invoices,
+        "all_invoices": all_invoices_lean,
     }
 
     result = wp_request("POST", wp_url, api_key, payload)
