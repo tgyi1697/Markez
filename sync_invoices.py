@@ -33,8 +33,12 @@ Szükséges környezeti változók (GitHub Secrets-ből):
 import json
 import os
 import re
+import smtplib
+import ssl
 import sys
 from datetime import date, datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 import requests
 from google.oauth2.service_account import Credentials
@@ -301,6 +305,127 @@ def now_hu_str():
     return datetime.utcnow().strftime("%Y.%m.%d. %H:%M UTC")
 
 
+# ---------------------------------------------------------------------
+# Napi összesítő email
+# ---------------------------------------------------------------------
+#
+# A workflow két, egy órával eltolt cronnal fut (06:12 CET és 06:12 CEST),
+# hogy a nyári/téli időszámítás-váltás ne csússza el a küldés idejét — csak
+# az az egy fusson le ténylegesen levélküldéssel, amelyiknél a tényleges
+# aktuális budapesti óra épp 6, a másik némán kihagyja (lásd main()).
+
+def budapest_now():
+    if ZoneInfo is None:
+        return None
+    try:
+        return datetime.now(ZoneInfo("Europe/Budapest"))
+    except Exception:
+        return None
+
+
+def fmt_amount_hu(n):
+    return f"{int(n):,}".replace(",", " ") + " Ft"
+
+
+def fmt_date_hu(iso):
+    """'ÉÉÉÉ-HH-NN' -> 'ÉÉÉÉ.HH.NN.'"""
+    try:
+        y, m, d = iso.split("-")
+        return f"{y}.{m}.{d}."
+    except Exception:
+        return iso or "—"
+
+
+def _summary_table_html(title, items, accent, empty_text):
+    if not items:
+        return (
+            f'<h3 style="margin:22px 0 4px;color:#2a2013;font-size:15px;">{title} (0)</h3>'
+            f'<p style="color:#8a7a63;font-size:13px;margin:0 0 4px;">{empty_text}</p>'
+        )
+    rows = "".join(
+        '<tr>'
+        f'<td style="padding:5px 8px;border-bottom:1px solid #e9dcc3;white-space:nowrap;">{fmt_date_hu(inv["hatarido"])}</td>'
+        f'<td style="padding:5px 8px;border-bottom:1px solid #e9dcc3;">{inv.get("tab") or "—"}</td>'
+        f'<td style="padding:5px 8px;border-bottom:1px solid #e9dcc3;">{inv.get("partner") or "—"}</td>'
+        f'<td style="padding:5px 8px;border-bottom:1px solid #e9dcc3;">{inv.get("megnevezes") or "—"}</td>'
+        f'<td style="padding:5px 8px;border-bottom:1px solid #e9dcc3;text-align:right;white-space:nowrap;">{fmt_amount_hu(inv.get("osszeg") or 0)}</td>'
+        '</tr>'
+        for inv in items
+    )
+    return f'''
+    <h3 style="margin:22px 0 6px;color:{accent};font-size:15px;">{title} ({len(items)})</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:13px;font-family:-apple-system,Segoe UI,sans-serif;">
+      <thead>
+        <tr style="text-align:left;color:#8a7a63;font-size:11px;text-transform:uppercase;">
+          <th style="padding:4px 8px;">Határidő</th>
+          <th style="padding:4px 8px;">Projekt</th>
+          <th style="padding:4px 8px;">Partner</th>
+          <th style="padding:4px 8px;">Megnevezés</th>
+          <th style="padding:4px 8px;text-align:right;">Összeg</th>
+        </tr>
+      </thead>
+      <tbody>{rows}</tbody>
+    </table>
+    '''
+
+
+def build_daily_summary_email(open_invoices, today_iso):
+    """open_invoices: a main() által számolt, még nyitott, határidős
+    számlák listája. Visszaadja a (subject, html_body, n_overdue, n_today,
+    n_upcoming) tuple-t."""
+    overdue = sorted((i for i in open_invoices if i["hatarido"] < today_iso), key=lambda i: i["hatarido"])
+    due_today = sorted((i for i in open_invoices if i["hatarido"] == today_iso), key=lambda i: (i.get("partner") or ""))
+    upcoming = sorted((i for i in open_invoices if i["hatarido"] > today_iso), key=lambda i: i["hatarido"])
+
+    body = f'''
+    <div style="font-family:-apple-system,Segoe UI,sans-serif;color:#2a2013;max-width:720px;margin:0 auto;">
+      <h2 style="margin:0 0 4px;font-size:19px;">Markez – napi számla-összesítő</h2>
+      <p style="color:#8a7a63;font-size:13px;margin:0 0 14px;">{fmt_date_hu(today_iso)}</p>
+      {_summary_table_html("Lejárt", overdue, "#c0392b", "Nincs lejárt, nyitott számla.")}
+      {_summary_table_html("Ma esedékes", due_today, "#b8860b", "Ma nincs esedékes számla.")}
+      {_summary_table_html("Közelgő", upcoming, "#1f7a5c", "Nincs közelgő, nyitott számla.")}
+    </div>
+    '''
+    subject = f"Markez – napi számla-összesítő – {len(overdue)} lejárt, {len(due_today)} ma esedékes"
+    return subject, body, len(overdue), len(due_today), len(upcoming)
+
+
+def send_daily_summary_email(open_invoices):
+    smtp_server = os.environ.get("SMTP_SERVER")
+    smtp_port = os.environ.get("SMTP_PORT") or "465"
+    smtp_user = os.environ.get("SMTP_USER")
+    smtp_password = os.environ.get("SMTP_PASSWORD")
+    email_to = os.environ.get("EMAIL_TO", "")
+    recipients = [addr.strip() for addr in email_to.split(",") if addr.strip()]
+
+    if not (smtp_server and smtp_user and smtp_password and recipients):
+        print("FIGYELEM: napi összesítő email kihagyva — hiányzó SMTP/EMAIL_TO beállítás.")
+        return
+
+    now = budapest_now()
+    today_iso = (now or datetime.utcnow()).date().isoformat()
+
+    subject, html, n_overdue, n_today, n_upcoming = build_daily_summary_email(open_invoices, today_iso)
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = smtp_user
+    msg["To"] = email_to
+    msg.attach(MIMEText(html, "html", "utf-8"))
+
+    try:
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL(smtp_server, int(smtp_port), context=context) as server:
+            server.login(smtp_user, smtp_password)
+            server.sendmail(smtp_user, recipients, msg.as_string())
+        print(
+            f"Napi összesítő email elküldve ide: {email_to} "
+            f"({n_overdue} lejárt, {n_today} ma esedékes, {n_upcoming} közelgő)."
+        )
+    except Exception as exc:
+        print(f"HIBA: nem sikerült elküldeni a napi összesítő emailt: {exc}")
+
+
 def main():
     sheets_service = get_sheets_service()
     sheet_id = os.environ["GOOGLE_SHEET_ID"]
@@ -369,6 +494,23 @@ def main():
         for inv in all_invoices
         if not inv["fizetve"] and inv["hatarido"]
     ]
+
+    # 2b) Napi összesítő email — csak azon a futáson, amit erre a workflow
+    # kifejezetten kijelöl (lásd SEND_DAILY_SUMMARY a workflow fájlban), és
+    # csak akkor, ha a tényleges budapesti óra épp 6 — a másik, egy órával
+    # eltolt cron (nyári/téli tartalék) ilyenkor némán kihagyja a küldést.
+    # FORCE_DAILY_SUMMARY-vel (a kézi "Run workflow" teszt-kapcsolójával)
+    # az óra-ellenőrzés megkerülhető, hogy bármikor tesztelhető legyen.
+    force_summary = os.environ.get("FORCE_DAILY_SUMMARY", "").strip().lower() == "true"
+    if os.environ.get("SEND_DAILY_SUMMARY", "").strip().lower() == "true":
+        now = budapest_now()
+        if force_summary or (now is not None and now.hour == 6):
+            send_daily_summary_email(open_invoices)
+        else:
+            print(
+                f"Napi email kihagyva — ez a nyári/téli tartalék cron futás "
+                f"(a jelenlegi budapesti óra: {now.hour if now else 'ismeretlen'}, nem 6)."
+            )
 
     # 3) A pénzügyi összesítőhöz (dashboard "Pénzügyi összesítő" panelje) az
     # ÖSSZES tétel kell — fizetett is, határidő nélküli is —, hogy a
