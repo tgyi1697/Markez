@@ -30,6 +30,7 @@ Szükséges környezeti változók (GitHub Secrets-ből):
   WP_SYNC_API_KEY             – a WPCode snippetben beállított titkos kulcs
 """
 
+import html
 import json
 import os
 import re
@@ -336,27 +337,45 @@ def fmt_date_hu(iso):
         return iso or "—"
 
 
-def _summary_table_html(title, items, accent, empty_text):
+def _id_cell_html(inv):
+    """Az iktatószám cellája — ha van hozzá kép-link (ugyanaz, mint a
+    dashboardon), akkor linkelve nyílik meg új fülön."""
+    inv_id = html.escape(str(inv.get("id") or "—"))
+    link = inv.get("kep_url")
+    if link:
+        return f'<a href="{html.escape(str(link), quote=True)}" target="_blank" rel="noopener" style="color:#F99A1C;text-decoration:none;">{inv_id}</a>'
+    return inv_id
+
+
+def _summary_table_html(title, items, accent, empty_text, row_bg=None, row_border=None):
+    """row_bg/row_border: ha meg van adva, minden sor (és a fejléc alja)
+    ezzel a háttér-/keretszínnel emelődik ki — ugyanúgy, mint a dashboardon
+    a "ma esedékes" számlacsoport kiemelése."""
     if not items:
         return (
             f'<h3 style="margin:22px 0 4px;color:#2a2013;font-size:15px;">{title} (0)</h3>'
             f'<p style="color:#8a7a63;font-size:13px;margin:0 0 4px;">{empty_text}</p>'
         )
+    cell_bg = f'background:{row_bg};' if row_bg else ''
+    border_style = f'1px solid {row_border}' if row_border else '1px solid #e9dcc3'
     rows = "".join(
-        '<tr>'
-        f'<td style="padding:5px 8px;border-bottom:1px solid #e9dcc3;white-space:nowrap;">{fmt_date_hu(inv["hatarido"])}</td>'
-        f'<td style="padding:5px 8px;border-bottom:1px solid #e9dcc3;">{inv.get("tab") or "—"}</td>'
-        f'<td style="padding:5px 8px;border-bottom:1px solid #e9dcc3;">{inv.get("partner") or "—"}</td>'
-        f'<td style="padding:5px 8px;border-bottom:1px solid #e9dcc3;">{inv.get("megnevezes") or "—"}</td>'
-        f'<td style="padding:5px 8px;border-bottom:1px solid #e9dcc3;text-align:right;white-space:nowrap;">{fmt_amount_hu(inv.get("osszeg") or 0)}</td>'
+        f'<tr style="{cell_bg}">'
+        f'<td style="padding:5px 8px;border-bottom:{border_style};white-space:nowrap;">{_id_cell_html(inv)}</td>'
+        f'<td style="padding:5px 8px;border-bottom:{border_style};white-space:nowrap;">{fmt_date_hu(inv["hatarido"])}</td>'
+        f'<td style="padding:5px 8px;border-bottom:{border_style};">{html.escape(str(inv.get("tab") or "—"))}</td>'
+        f'<td style="padding:5px 8px;border-bottom:{border_style};">{html.escape(str(inv.get("partner") or "—"))}</td>'
+        f'<td style="padding:5px 8px;border-bottom:{border_style};">{html.escape(str(inv.get("megnevezes") or "—"))}</td>'
+        f'<td style="padding:5px 8px;border-bottom:{border_style};text-align:right;white-space:nowrap;">{fmt_amount_hu(inv.get("osszeg") or 0)}</td>'
         '</tr>'
         for inv in items
     )
+    table_border = f'border:1px solid {row_border};border-radius:8px;overflow:hidden;' if row_border else ''
     return f'''
     <h3 style="margin:22px 0 6px;color:{accent};font-size:15px;">{title} ({len(items)})</h3>
-    <table style="width:100%;border-collapse:collapse;font-size:13px;font-family:-apple-system,Segoe UI,sans-serif;">
+    <table style="width:100%;border-collapse:collapse;font-size:13px;font-family:-apple-system,Segoe UI,sans-serif;{table_border}">
       <thead>
-        <tr style="text-align:left;color:#8a7a63;font-size:11px;text-transform:uppercase;">
+        <tr style="text-align:left;color:#8a7a63;font-size:11px;text-transform:uppercase;{cell_bg}">
+          <th style="padding:4px 8px;">Iktatószám</th>
           <th style="padding:4px 8px;">Határidő</th>
           <th style="padding:4px 8px;">Projekt</th>
           <th style="padding:4px 8px;">Partner</th>
@@ -377,16 +396,18 @@ def build_daily_summary_email(open_invoices, today_iso):
     due_today = sorted((i for i in open_invoices if i["hatarido"] == today_iso), key=lambda i: (i.get("partner") or ""))
     upcoming = sorted((i for i in open_invoices if i["hatarido"] > today_iso), key=lambda i: i["hatarido"])
 
+    # A "ma esedékes" csoport ugyanazt a világos, piros-narancsos kiemelést
+    # kapja, mint a dashboardon (--overdue / --overdue-bg tokenek).
     body = f'''
-    <div style="font-family:-apple-system,Segoe UI,sans-serif;color:#2a2013;max-width:720px;margin:0 auto;">
+    <div style="font-family:-apple-system,Segoe UI,sans-serif;color:#2a2013;max-width:760px;margin:0 auto;">
       <h2 style="margin:0 0 4px;font-size:19px;">Markez – napi számla-összesítő</h2>
       <p style="color:#8a7a63;font-size:13px;margin:0 0 14px;">{fmt_date_hu(today_iso)}</p>
+      {_summary_table_html("Ma esedékes", due_today, "#c0392b", "Ma nincs esedékes számla.", row_bg="#fbe6e2", row_border="#c0392b")}
       {_summary_table_html("Lejárt", overdue, "#c0392b", "Nincs lejárt, nyitott számla.")}
-      {_summary_table_html("Ma esedékes", due_today, "#b8860b", "Ma nincs esedékes számla.")}
       {_summary_table_html("Közelgő", upcoming, "#1f7a5c", "Nincs közelgő, nyitott számla.")}
     </div>
     '''
-    subject = f"Markez – napi számla-összesítő – {len(overdue)} lejárt, {len(due_today)} ma esedékes"
+    subject = f"Markez – napi számla-összesítő – {len(due_today)} ma esedékes, {len(overdue)} lejárt"
     return subject, body, len(overdue), len(due_today), len(upcoming)
 
 
