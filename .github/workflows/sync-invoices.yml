@@ -5,7 +5,20 @@ on:
     # Óránként, a whole hour-tól kicsit eltolva (GitHub cron gyakran csúszik
     # pontban egész órakor, a :07 kevésbé zsúfolt időpont)
     - cron: "7 * * * *"
-  workflow_dispatch: {}   # kézi indítás a GitHub felületén, teszteléshez
+    # Napi számla-összesítő email — cél: 06:12 magyar idő. A GitHub cron
+    # UTC-ben fut és nem ismeri a nyári/téli időszámítást, ezért két,
+    # egy órával eltolt cronra van szükség; a script maga dönti el a
+    # tényleges budapesti óra alapján, hogy melyik "az igazi" (lásd
+    # SEND_DAILY_SUMMARY lent és sync_invoices.py budapest_now()).
+    - cron: "12 5 * * *"   # 06:12 CET (téli időszámítás, UTC+1)
+    - cron: "12 4 * * *"   # 06:12 CEST (nyári időszámítás, UTC+2)
+  workflow_dispatch:      # kézi indítás a GitHub felületén, teszteléshez
+    inputs:
+      send_test_email:
+        description: "Napi összesítő teszt-email küldése is ennél a futásnál"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   sync:
@@ -26,4 +39,11 @@ jobs:
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           WP_SYNC_URL: ${{ secrets.WP_SYNC_URL }}
           WP_SYNC_API_KEY: ${{ secrets.WP_SYNC_API_KEY }}
+          SMTP_SERVER: we005.tarhely.com
+          SMTP_PORT: "465"
+          SMTP_USER: szamla@markez.hu
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          SEND_DAILY_SUMMARY: ${{ github.event.schedule == '12 5 * * *' || github.event.schedule == '12 4 * * *' || github.event.inputs.send_test_email == 'true' }}
+          FORCE_DAILY_SUMMARY: ${{ github.event.inputs.send_test_email == 'true' }}
         run: python sync_invoices.py
