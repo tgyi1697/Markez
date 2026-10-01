@@ -311,9 +311,19 @@ def now_hu_str():
 # ---------------------------------------------------------------------
 #
 # A workflow két, egy órával eltolt cronnal fut (06:12 CET és 06:12 CEST),
-# hogy a nyári/téli időszámítás-váltás ne csússza el a küldés idejét — csak
-# az az egy fusson le ténylegesen levélküldéssel, amelyiknél a tényleges
-# aktuális budapesti óra épp 6, a másik némán kihagyja (lásd main()).
+# hogy a nyári/téli időszámítás-váltás ne csússza el a küldés idejét — a
+# kettő közül az "igaz" azt dönti el, melyik illik a mai budapesti UTC-
+# eltoláshoz (lásd is_correct_daily_cron() lent).
+#
+# FONTOS: ezt NEM a tényleges aktuális óra (pl. "most 6 van-e") alapján
+# döntjük el, mert a GitHub Actions ütemezett futásai néha jelentősen
+# (akár több mint egy órát) csúszhatnak a meghirdetett időponthoz képest —
+# egy csúszó futásnál a "most 6 van-e" teszt tévesen kihagyná a küldést,
+# pedig az adott cron egyébként a helyes volt. Ehelyett azt nézzük, hogy a
+# workflow-t ténylegesen melyik cron-kifejezés indította el
+# (github.event.schedule, lásd DAILY_SCHEDULE_CRON a workflow fájlban), és
+# ezt vetjük össze a mai nap tényleges CET/CEST eltolásával — ez a csúszástól
+# függetlenül helyes marad.
 
 def budapest_now():
     if ZoneInfo is None:
@@ -322,6 +332,26 @@ def budapest_now():
         return datetime.now(ZoneInfo("Europe/Budapest"))
     except Exception:
         return None
+
+
+DAILY_CRON_CET = "12 5 * * *"   # 06:12 CET (téli időszámítás, UTC+1)
+DAILY_CRON_CEST = "12 4 * * *"  # 06:12 CEST (nyári időszámítás, UTC+2)
+
+
+def is_correct_daily_cron(schedule_str):
+    """Eldönti, hogy a megadott (ténylegesen lefuttatott) cron-kifejezés
+    illik-e a mai budapesti nyári/téli időszámításhoz — a tényleges UTC-
+    eltolás alapján, nem a pillanatnyi órától függően, hogy egy csúszó
+    GitHub Actions futás se maradjon ki emiatt."""
+    schedule_str = (schedule_str or "").strip()
+    if not schedule_str:
+        return False
+    now = budapest_now()
+    if now is None:
+        return False
+    offset = now.utcoffset()
+    is_summer = offset is not None and offset.total_seconds() == 2 * 3600
+    return schedule_str == (DAILY_CRON_CEST if is_summer else DAILY_CRON_CET)
 
 
 def fmt_amount_hu(n):
@@ -426,13 +456,13 @@ def send_daily_summary_email(open_invoices):
     now = budapest_now()
     today_iso = (now or datetime.utcnow()).date().isoformat()
 
-    subject, html, n_overdue, n_today, n_upcoming = build_daily_summary_email(open_invoices, today_iso)
+    subject, html_body, n_overdue, n_today, n_upcoming = build_daily_summary_email(open_invoices, today_iso)
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = smtp_user
     msg["To"] = email_to
-    msg.attach(MIMEText(html, "html", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     try:
         context = ssl.create_default_context()
@@ -516,21 +546,23 @@ def main():
         if not inv["fizetve"] and inv["hatarido"]
     ]
 
-    # 2b) Napi összesítő email — csak azon a futáson, amit erre a workflow
-    # kifejezetten kijelöl (lásd SEND_DAILY_SUMMARY a workflow fájlban), és
-    # csak akkor, ha a tényleges budapesti óra épp 6 — a másik, egy órával
-    # eltolt cron (nyári/téli tartalék) ilyenkor némán kihagyja a küldést.
-    # FORCE_DAILY_SUMMARY-vel (a kézi "Run workflow" teszt-kapcsolójával)
-    # az óra-ellenőrzés megkerülhető, hogy bármikor tesztelhető legyen.
+    # 2b) Napi összesítő email — csak azon a futáson megy ki, amelyiket a
+    # workflow-ban beállított két cron közül a mai nyári/téli időszámítás
+    # szerint a helyesnek számít (lásd is_correct_daily_cron() fent) — ez a
+    # GitHub Actions ütemezett futások esetleges csúszásától függetlenül
+    # helyesen dönt. FORCE_DAILY_SUMMARY-vel (a kézi "Run workflow"
+    # teszt-kapcsolójával) ez megkerülhető, hogy bármikor tesztelhető legyen.
     force_summary = os.environ.get("FORCE_DAILY_SUMMARY", "").strip().lower() == "true"
-    if os.environ.get("SEND_DAILY_SUMMARY", "").strip().lower() == "true":
-        now = budapest_now()
-        if force_summary or (now is not None and now.hour == 6):
+    daily_cron = os.environ.get("DAILY_SCHEDULE_CRON", "").strip()
+    if force_summary:
+        send_daily_summary_email(open_invoices)
+    elif daily_cron:
+        if is_correct_daily_cron(daily_cron):
             send_daily_summary_email(open_invoices)
         else:
             print(
                 f"Napi email kihagyva — ez a nyári/téli tartalék cron futás "
-                f"(a jelenlegi budapesti óra: {now.hour if now else 'ismeretlen'}, nem 6)."
+                f"({daily_cron!r} nem a mai időszámításhoz tartozik)."
             )
 
     # 3) A pénzügyi összesítőhöz (dashboard "Pénzügyi összesítő" panelje) az
