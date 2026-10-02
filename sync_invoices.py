@@ -2,10 +2,10 @@
 """
 Markez dashboard – számla-szinkronizáló script.
 
-Óránként (GitHub Actions cron) lefut, beolvassa az "Iktatás 2026" Google
-Sheets fájlt egy service accounttal, kigyűjti az összes projekt-fülön
-található, még ki nem fizetett, fizetési határidővel rendelkező tételt,
-és POST-olja egy WordPress REST végpontra.
+Munkaidőben, óránként (GitHub Actions cron) lefut, beolvassa az "Iktatás
+2026" Google Sheets fájlt egy service accounttal, kigyűjti az összes
+projekt-fülön található, még ki nem fizetett, fizetési határidővel
+rendelkező tételt, és POST-olja egy WordPress REST végpontra.
 
 A tábla szerkezete fülenként ismétlődő blokkokból áll: valahol a fülön
 van egy fejléc-sor, ami tartalmazza az "Iktatószám", "Fizetési határidő"
@@ -20,6 +20,11 @@ dashboardon valaki bepipált) minden futáskor visszaírja a Sheetbe
 állapotból — így a checkbox a felületen csak a sikeres visszaírás
 után tűnik el ténylegesen a listáról.
 
+Minden nap első (munkaidős) futása ezen felül egy összesítő emailt is
+küld a nyitott számlákról (lásd a fájl végén a "Napi összesítő email"
+szakaszt) — ezt a WordPress-en tárolt dátum alapján ismeri fel, nem kell
+hozzá külön ütemezés vagy óra-vizsgálat.
+
 Szükséges környezeti változók (GitHub Secrets-ből):
   GOOGLE_SERVICE_ACCOUNT_KEY  – a service account JSON kulcsának teljes tartalma
                                  (a service accountnak Szerkesztő jogosultsággal
@@ -28,6 +33,9 @@ Szükséges környezeti változók (GitHub Secrets-ből):
   WP_SYNC_URL                 – a WordPress REST végpont teljes URL-je
                                  (pl. https://markez.hu/wp-json/markez/v1/invoices)
   WP_SYNC_API_KEY             – a WPCode snippetben beállított titkos kulcs
+  SMTP_SERVER, SMTP_PORT,
+  SMTP_USER, SMTP_PASSWORD    – a napi összesítő emailt küldő postafiók SMTP adatai
+  EMAIL_TO                    – a napi összesítő címzett(ek)je, vesszővel elválasztva
 """
 
 import html
@@ -310,20 +318,15 @@ def now_hu_str():
 # Napi összesítő email
 # ---------------------------------------------------------------------
 #
-# A workflow két, egy órával eltolt cronnal fut (06:12 CET és 06:12 CEST),
-# hogy a nyári/téli időszámítás-váltás ne csússza el a küldés idejét — a
-# kettő közül az "igaz" azt dönti el, melyik illik a mai budapesti UTC-
-# eltoláshoz (lásd is_correct_daily_cron() lent).
-#
-# FONTOS: ezt NEM a tényleges aktuális óra (pl. "most 6 van-e") alapján
-# döntjük el, mert a GitHub Actions ütemezett futásai néha jelentősen
-# (akár több mint egy órát) csúszhatnak a meghirdetett időponthoz képest —
-# egy csúszó futásnál a "most 6 van-e" teszt tévesen kihagyná a küldést,
-# pedig az adott cron egyébként a helyes volt. Ehelyett azt nézzük, hogy a
-# workflow-t ténylegesen melyik cron-kifejezés indította el
-# (github.event.schedule, lásd DAILY_SCHEDULE_CRON a workflow fájlban), és
-# ezt vetjük össze a mai nap tényleges CET/CEST eltolásával — ez a csúszástól
-# függetlenül helyes marad.
+# A workflow munkaidőben, óránként fut (lásd a workflow fájl "schedule"
+# részét) — nem vizsgálunk sem órát, sem cron-kifejezést: a WordPress-en
+# (a /last-email-date végponton) tartjuk nyilván, melyik napra (ÉÉÉÉ-HH-NN,
+# budapesti dátum) ment már ki a levél. Minden futás megnézi ezt, és ha a
+# mai dátum még nincs ott, ez számít "a mai első futásnak" — elküldi a
+# levelet, majd frissíti az elmentett dátumot. Ha egy adott nap első
+# munkaidős futása bármiért kimarad (pl. a GitHub átmenetileg nem indítja
+# el), a következő órás futás még aznap pótolja — nem kell rá külön
+# figyelni.
 
 def budapest_now():
     if ZoneInfo is None:
@@ -334,24 +337,23 @@ def budapest_now():
         return None
 
 
-DAILY_CRON_CET = "12 5 * * *"   # 06:12 CET (téli időszámítás, UTC+1)
-DAILY_CRON_CEST = "12 4 * * *"  # 06:12 CEST (nyári időszámítás, UTC+2)
+def already_emailed_today(wp_url, api_key, today_iso):
+    """Lekéri a WordPress-től, mikori dátumra ment már ki legutóbb a napi
+    összesítő email, és összeveti a mai budapesti dátummal."""
+    base_url = wp_url.rstrip("/").rsplit("/invoices", 1)[0]
+    data = wp_request("GET", f"{base_url}/last-email-date", api_key)
+    if not data:
+        # Ha a lekérés sikertelen, inkább ne küldjünk (lehet, hogy ma már
+        # elment, csak épp nem sikerült ellenőrizni) — a következő órás
+        # futás úgyis újrapróbálja.
+        print("FIGYELEM: nem sikerült lekérni, ment-e már ma napi email — a mostani futás emiatt nem küld.")
+        return True
+    return data.get("date") == today_iso
 
 
-def is_correct_daily_cron(schedule_str):
-    """Eldönti, hogy a megadott (ténylegesen lefuttatott) cron-kifejezés
-    illik-e a mai budapesti nyári/téli időszámításhoz — a tényleges UTC-
-    eltolás alapján, nem a pillanatnyi órától függően, hogy egy csúszó
-    GitHub Actions futás se maradjon ki emiatt."""
-    schedule_str = (schedule_str or "").strip()
-    if not schedule_str:
-        return False
-    now = budapest_now()
-    if now is None:
-        return False
-    offset = now.utcoffset()
-    is_summer = offset is not None and offset.total_seconds() == 2 * 3600
-    return schedule_str == (DAILY_CRON_CEST if is_summer else DAILY_CRON_CET)
+def mark_emailed_today(wp_url, api_key, today_iso):
+    base_url = wp_url.rstrip("/").rsplit("/invoices", 1)[0]
+    wp_request("POST", f"{base_url}/last-email-date", api_key, {"date": today_iso})
 
 
 def fmt_amount_hu(n):
@@ -451,7 +453,7 @@ def send_daily_summary_email(open_invoices):
 
     if not (smtp_server and smtp_user and smtp_password and recipients):
         print("FIGYELEM: napi összesítő email kihagyva — hiányzó SMTP/EMAIL_TO beállítás.")
-        return
+        return False
 
     now = budapest_now()
     today_iso = (now or datetime.utcnow()).date().isoformat()
@@ -473,8 +475,10 @@ def send_daily_summary_email(open_invoices):
             f"Napi összesítő email elküldve ide: {email_to} "
             f"({n_overdue} lejárt, {n_today} ma esedékes, {n_upcoming} közelgő)."
         )
+        return True
     except Exception as exc:
         print(f"HIBA: nem sikerült elküldeni a napi összesítő emailt: {exc}")
+        return False
 
 
 def main():
@@ -546,24 +550,21 @@ def main():
         if not inv["fizetve"] and inv["hatarido"]
     ]
 
-    # 2b) Napi összesítő email — csak azon a futáson megy ki, amelyiket a
-    # workflow-ban beállított két cron közül a mai nyári/téli időszámítás
-    # szerint a helyesnek számít (lásd is_correct_daily_cron() fent) — ez a
-    # GitHub Actions ütemezett futások esetleges csúszásától függetlenül
-    # helyesen dönt. FORCE_DAILY_SUMMARY-vel (a kézi "Run workflow"
-    # teszt-kapcsolójával) ez megkerülhető, hogy bármikor tesztelhető legyen.
+    # 2b) Napi összesítő email — a mai (budapesti) nap első futása küldi el.
+    # A WordPress-en tartjuk nyilván, melyik napra ment már ki a levél, így
+    # nem kell órát/cront vizsgálni: ha a mai dátumra még nem ment ki,
+    # elküldjük, és elmentjük, hogy ma már megtörtént. FORCE_DAILY_SUMMARY-
+    # vel (a kézi "Run workflow" teszt-kapcsolójával) ez megkerülhető.
     force_summary = os.environ.get("FORCE_DAILY_SUMMARY", "").strip().lower() == "true"
-    daily_cron = os.environ.get("DAILY_SCHEDULE_CRON", "").strip()
+    now = budapest_now()
+    today_iso = (now or datetime.utcnow()).date().isoformat()
     if force_summary:
         send_daily_summary_email(open_invoices)
-    elif daily_cron:
-        if is_correct_daily_cron(daily_cron):
-            send_daily_summary_email(open_invoices)
-        else:
-            print(
-                f"Napi email kihagyva — ez a nyári/téli tartalék cron futás "
-                f"({daily_cron!r} nem a mai időszámításhoz tartozik)."
-            )
+    elif already_emailed_today(wp_url, api_key, today_iso):
+        print(f"Napi email kihagyva — a mai napra ({today_iso}) már elment korábban.")
+    else:
+        if send_daily_summary_email(open_invoices):
+            mark_emailed_today(wp_url, api_key, today_iso)
 
     # 3) A pénzügyi összesítőhöz (dashboard "Pénzügyi összesítő" panelje) az
     # ÖSSZES tétel kell — fizetett is, határidő nélküli is —, hogy a

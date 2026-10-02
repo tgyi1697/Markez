@@ -1,8 +1,9 @@
 # Markez – számla-szinkronizáció
 
-Ez a repó óránként két irányban szinkronizál a Markez **"Iktatás 2026"**
-Google Sheets táblázata és a markez.hu-n futó dashboard között, és naponta
-egyszer egy összesítő emailt is küld a nyitott számlákról.
+Ez a repó munkaidőben óránként két irányban szinkronizál a Markez
+**"Iktatás 2026"** Google Sheets táblázata és a markez.hu-n futó dashboard
+között, és minden nap az első (munkaidős) futáskor egy összesítő emailt is
+küld a nyitott számlákról.
 
 1. beolvassa a táblázatot, kigyűjti belőle a még ki nem fizetett, ismert
    határidejű számlákat, és beküldi őket a WordPress REST végpontjára;
@@ -47,26 +48,38 @@ futáskor a script:
 Ha a Sheet-be írás sikertelen (pl. WAF-probléma), a tétel a következő órában
 újra megpróbálja — addig halványan, kipipálva marad a felületen.
 
+## Munkaidős ütemezés
+
+A workflow csak munkaidőben, óránként fut: UTC 4:00–14:00, ami nyári
+időszámításkor (CEST, március vége – október vége) budapesti 6:00–16:00-nak
+felel meg. Télen (CET) ez a sáv is egy órával korábbra tolódik (helyi idő
+szerint kb. 5:00–15:00) — ezt szándékosan nem kezeljük két külön cronnal,
+hogy a beállítás egyszerű maradjon; a pontos induló/záró óra télen ennyivel
+csúszik, de ez a napi email küldését (lásd lent) nem befolyásolja.
+
 ## Napi számla-összesítő email
 
-Minden nap 06:12-kor (magyar idő) a script egy összesítő emailt küld a
-`szamla@markez.hu` postafiókból (a markez.hu tárhelyének saját SMTP
-szerverén, `we005.tarhely.com:465`, SSL-lel — nem Gmailen keresztül) az
-`EMAIL_TO` secretben megadott címzett(ek)nek. A levél három csoportba
-rendezve mutatja a még ki nem fizetett, határidővel rendelkező számlákat:
+A nap első (munkaidős) futása egy összesítő emailt küld a `szamla@markez.hu`
+postafiókból (a markez.hu tárhelyének saját SMTP szerverén,
+`we005.tarhely.com:465`, SSL-lel — nem Gmailen keresztül) az `EMAIL_TO`
+secretben megadott címzett(ek)nek. A levél három csoportba rendezve mutatja
+a még ki nem fizetett, határidővel rendelkező számlákat, a "Ma esedékes"
+elöl, kiemelt (piros-narancsos) háttérrel, az iktatószámok pedig — ha van
+hozzájuk kép-link — linkelve, ugyanúgy, mint a dashboardon:
 
-- **Lejárt** — a határidejük már elmúlt,
 - **Ma esedékes** — pontosan aznap jár le a határidejük,
+- **Lejárt** — a határidejük már elmúlt,
 - **Közelgő** — minden további nyitott, határidős számla (nincs felső korlát).
 
-A küldés az óránkénti szinkrontól függetlenül, külön ütemezésen fut (lásd a
-workflow fájl `schedule` részét). Mivel a GitHub Actions cron UTC-ben fut és
-nem ismeri a nyári/téli időszámítás-váltást, két, egy órával eltolt cron van
-beállítva (`12 5 * * *` és `12 4 * * *`); a script a tényleges budapesti óra
-alapján (a `zoneinfo` modullal) dönti el, hogy melyik a "helyes" — csak az
-küld emailt, aminél épp 6 az aktuális magyar óra, a másik némán kihagyja.
-Ha az SMTP-adatok vagy az `EMAIL_TO` secret hiányzik, a script ezt csak
-naplózza és a normál szinkron egyébként zavartalanul lefut.
+A "melyik futás számít az első mainak" kérdést nem óra- vagy cron-vizsgálat
+dönti el, hanem egy egyszerű állapot a WordPress-en (a dashboard snippet
+`/wp-json/markez/v1/last-email-date` végpontja, ugyanazzal az API-kulcsos
+védelemmel, mint a `/pending-paid`): minden futás megnézi, ment-e már ki a
+levél a mai (budapesti) dátumra, és ha nem, elküldi, majd elmenti a mai
+dátumot. Ha egy nap első munkaidős futása bármiért kimarad, a következő órás
+futás még aznap pótolja. Ha az SMTP-adatok vagy az `EMAIL_TO` secret
+hiányzik, a script ezt csak naplózza, és a normál szinkron egyébként
+zavartalanul lefut.
 
 ## Beállítandó GitHub Secrets
 
