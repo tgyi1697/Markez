@@ -2,18 +2,12 @@ name: Számlák szinkronizálása
 
 on:
   schedule:
-    # Óránként, a whole hour-tól kicsit eltolva (GitHub cron gyakran csúszik
-    # pontban egész órakor, a :07 kevésbé zsúfolt időpont)
-    - cron: "7 * * * *"
-    # Napi számla-összesítő email — cél: 06:12 magyar idő. A GitHub cron
-    # UTC-ben fut és nem ismeri a nyári/téli időszámítást, ezért két,
-    # egy órával eltolt cronra van szükség; a script dönti el a mai
-    # budapesti UTC-eltolás alapján, hogy melyik "az igazi" — nem a
-    # tényleges órától függően, mert a GitHub ütemezett futásai néha
-    # (akár jelentősen) csúszhatnak (lásd DAILY_SCHEDULE_CRON lent és
-    # sync_invoices.py is_correct_daily_cron()).
-    - cron: "12 5 * * *"   # 06:12 CET (téli időszámítás, UTC+1)
-    - cron: "12 4 * * *"   # 06:12 CEST (nyári időszámítás, UTC+2)
+    # Óránként, csak munkaidőben — UTC 4:00–14:00, ami nyári időszámításkor
+    # (CEST, UTC+2) budapesti 6:00–16:00-nak felel meg. Télen (CET, UTC+1)
+    # ez 1 órával korábbra csúszik (5:00–15:00 helyi idő) — ezt direkt nem
+    # kezeljük két külön cronnal, hogy a logika egyszerű maradjon; a napi
+    # email időzítése emiatt nem a pontos óratól függ (lásd lent).
+    - cron: "7 4-14 * * 1-5"
   workflow_dispatch:      # kézi indítás a GitHub felületén, teszteléshez
     inputs:
       send_test_email:
@@ -46,6 +40,5 @@ jobs:
           SMTP_USER: szamla@markez.hu
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-          DAILY_SCHEDULE_CRON: ${{ github.event.schedule }}
           FORCE_DAILY_SUMMARY: ${{ github.event.inputs.send_test_email == 'true' }}
         run: python sync_invoices.py
