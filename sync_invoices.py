@@ -558,8 +558,11 @@ def main():
     force_summary = os.environ.get("FORCE_DAILY_SUMMARY", "").strip().lower() == "true"
     now = budapest_now()
     today_iso = (now or datetime.utcnow()).date().isoformat()
+    is_weekend = now is not None and now.weekday() >= 5  # 5 = szombat, 6 = vasárnap
     if force_summary:
         send_daily_summary_email(open_invoices)
+    elif is_weekend:
+        print("Napi email kihagyva — hétvége van (hétfőn megy a következő).")
     elif already_emailed_today(wp_url, api_key, today_iso):
         print(f"Napi email kihagyva — a mai napra ({today_iso}) már elment korábban.")
     else:
